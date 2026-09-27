@@ -45,60 +45,63 @@ def process_labels_gold_table(snapshot_date_str, silver_loan_daily_directory, go
     return df
 
 
-def process_features_gold_table(
-    snapshot_date_str,
-    silver_loan_daily_directory,
-    silver_attributes_directory,
-    silver_financials_directory,
-    silver_clickstream_directory,
-    gold_feature_store_directory,
-    spark
-):
+def process_features_gold_table(snapshot_date_str,silver_loan_daily_directory,silver_attributes_directory,silver_financials_directory,
+                                silver_clickstream_directory,gold_feature_store_directory,spark):
     # prepare arguments
-    snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
     date_suffix = snapshot_date_str.replace('-', '_')
-    
-    # 1. Load Silver LMS table (Driver) and create loan-level behavioral features
+ 
+    # keep loans that START this month i.e. mob 0 
     lms_filepath = silver_loan_daily_directory + "silver_loan_daily_" + date_suffix + '.parquet'
-    lms_df = spark.read.parquet(lms_filepath)
-    
-    lms_df = lms_df.withColumn(
-        "paid_to_due_ratio", 
-        F.when(col("due_amt") > 0, col("paid_amt") / col("due_amt")).otherwise(1.0)
-    ).withColumn(
-        "overdue_to_balance_ratio", 
-        F.when(col("balance") > 0, col("overdue_amt") / col("balance")).otherwise(0.0)
-    )
-
-    # 2. Load Customer Silver tables
-    attr_filepath = silver_attributes_directory + "silver_attributes_" + date_suffix + '.parquet'
-    fin_filepath = silver_financials_directory + "silver_financials_" + date_suffix + '.parquet'
-    click_filepath = silver_clickstream_directory + "silver_clickstream_" + date_suffix + '.parquet'
-
-    attr_df = spark.read.parquet(attr_filepath).select(
-        "Customer_ID", "snapshot_date", "Age_clean", "Occupation"
-    )
-    
-    fin_df = spark.read.parquet(fin_filepath).select(
-        "Customer_ID", "snapshot_date", "Annual_Income", "Monthly_Inhand_Salary",
-        "Num_Bank_Accounts_clean", "Num_Credit_Card_clean", "Interest_Rate_clean",
-        "Num_of_Loan_clean", "Outstanding_Debt", "Credit_Utilization_Ratio",
-        "Credit_History_Age_in_mths", "delayed_payment_rate", "Monthly_Balance_clean"
-    )
-    
-    click_df = spark.read.parquet(click_filepath)
-
-    # 3. Combine loan features with customer features on Customer_ID and snapshot_date
-    gold_df = lms_df \
-        .join(attr_df, on=["Customer_ID", "snapshot_date"], how="left") \
-        .join(fin_df, on=["Customer_ID", "snapshot_date"], how="left") \
-        .join(click_df, on=["Customer_ID", "snapshot_date"], how="left")
-
-    # 4. Save combined Gold feature store table
+    loans_df = spark.read.parquet(lms_filepath) \
+        .filter(col("mob") == 0) \
+        .select("loan_id", "Customer_ID", "loan_start_date", "tenure", "loan_amt")
+    print('loans starting', snapshot_date_str, ':', loans_df.count())
+ 
+    # load ustomer silver tables all months up to this date (nothing from the future is loaded)
+    attr_df = spark.read.parquet(silver_attributes_directory + "silver_attributes_*.parquet") \
+        .filter(col("snapshot_date") <= snapshot_date_str) \
+        .select(col("Customer_ID").alias("attr_cid"), col("snapshot_date").alias("attr_date"),
+                "Age_clean", "Occupation")
+ 
+    fin_df = spark.read.parquet(silver_financials_directory + "silver_financials_*.parquet") \
+        .filter(col("snapshot_date") <= snapshot_date_str) \
+        .select(col("Customer_ID").alias("fin_cid"), col("snapshot_date").alias("fin_date"),
+                "Annual_Income", "Monthly_Inhand_Salary", "Num_Bank_Accounts_clean",
+                "Num_Credit_Card_clean", "Interest_Rate_clean", "Num_of_Loan_clean",
+                "Outstanding_Debt", "Credit_Utilization_Ratio", "Credit_History_Age_in_mths",
+                "delayed_payment_rate", "Monthly_Balance_clean")
+ 
+    fe_cols = [f"fe_{i}" for i in range(1, 21)]
+    click_df = spark.read.parquet(silver_clickstream_directory + "silver_clickstream_*.parquet") \
+        .filter(col("snapshot_date") <= snapshot_date_str) \
+        .select(col("Customer_ID").alias("click_cid"), col("snapshot_date").alias("click_date"), *fe_cols)
+ 
+    # 3. Join on Customer_ID with the DATE AS A CONDITION: only data available at loan start
+    gold_df = loans_df.join(attr_df,
+        (col("Customer_ID") == col("attr_cid")) & (col("attr_date") <= col("loan_start_date")), "left")
+ 
+    gold_df = gold_df.join(fin_df,
+        (col("Customer_ID") == col("fin_cid")) & (col("fin_date") <= col("loan_start_date")), "left")
+ 
+    # 4. Clickstream: average of the 6 months up to loan start
+    click_6m = loans_df.join(click_df,
+        (col("Customer_ID") == col("click_cid")) &
+        (col("click_date") <= col("loan_start_date")) &
+        (col("click_date") > F.add_months(col("loan_start_date"), -6)), "left") \
+        .groupBy("loan_id") \
+        .agg(*[F.avg(c).alias(c + "_avg_6m") for c in fe_cols])
+ 
+    gold_df = gold_df.join(click_6m, on="loan_id", how="left")
+ 
+    # 5. Tidy up: drop renamed keys, tag partition date
+    gold_df = gold_df.drop("attr_cid", "fin_cid") \
+        .withColumn("snapshot_date", F.lit(snapshot_date_str).cast(DateType()))
+ 
+    # 6. Save gold feature store table (one row per loan)
     partition_name = "gold_feature_store_" + date_suffix + '.parquet'
     filepath = gold_feature_store_directory + partition_name
-    
     gold_df.write.mode("overwrite").parquet(filepath)
-    print('saved combined gold feature store to:', filepath, 'row count:', gold_df.count())
-    
+    print('saved to:', filepath, 'row count:', gold_df.count())
+ 
     return gold_df
+ 
