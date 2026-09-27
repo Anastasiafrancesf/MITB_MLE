@@ -123,7 +123,7 @@ def process_silver_table_attributes(snapshot_date_str, bronze_attributes_directo
     )
 
     df = df.withColumn("Age_clean", col("Age").cast(IntegerType()))
-    df = df.withColumn("Age_flag", col("Age_clean") > 100 | col("Age_clean") < 0)
+    df = df.withColumn("Age_flag", (col("Age_clean") > 100) | (col("Age_clean") < 0))
     df = df.withColumn("Age_clean",
         F.when(col("Age_flag"), None).otherwise(col("Age_clean")))
 
@@ -210,11 +210,12 @@ def process_silver_table_financials(snapshot_date_str, bronze_financials_directo
     df = df.withColumn("Interest_Rate_flag", col("Interest_Rate_clean") > 40)
     df = df.withColumn("Interest_Rate_clean", F.when(col("Interest_Rate_flag"), None).otherwise(col("Interest_Rate_clean")))
 
-    #Outlier of Num_Bank_accounts
+    # Num_Bank_Accounts: cast, flag negatives or > 15
     df = df.withColumn("Num_Bank_Accounts_clean", col("Num_Bank_Accounts").cast(IntegerType()))
-    df = df.withColumn("Num_Bank_Accounts_flag", col("Num_Bank_Accounts_clean") < 0)
+    df = df.withColumn("Num_Bank_Accounts_flag",
+        (col("Num_Bank_Accounts_clean") < 0) | (col("Num_Bank_Accounts_clean") > 15))
     df = df.withColumn("Num_Bank_Accounts_clean",
-        F.when(col("Num_Bank_Accounts_flag"), None).otherwise(col("Num_Bank_Accounts_clean")))    
+        F.when(col("Num_Bank_Accounts_flag"), None).otherwise(col("Num_Bank_Accounts_clean")))
 
     df = df.withColumn("Num_of_Loan_clean", col("Num_of_Loan").cast(IntegerType()))
     df = df.withColumn("Num_of_Loan_flag", col("Num_of_Loan_clean") >= 18)
@@ -226,11 +227,6 @@ def process_silver_table_financials(snapshot_date_str, bronze_financials_directo
     df = df.withColumn("Num_Credit_Card_flag", col("Num_Credit_Card_clean") > 12)
     df = df.withColumn("Num_Credit_Card_clean",
         F.when(col("Num_Credit_Card_flag"), None).otherwise(col("Num_Credit_Card_clean")))
-
-    # Num_Bank_Accounts: cast, flag negatives
-    df = df.withColumn("Num_Bank_Accounts_flag", col("Num_Bank_Accounts_clean") > 15)
-    df = df.withColumn("Num_Bank_Accounts_clean",
-        F.when(col("Num_Bank_Accounts_flag"), None).otherwise(col("Num_Bank_Accounts_clean")))
 
     # Num_Credit_Inquiries: cast, flag > 20
     df = df.withColumn("Num_Credit_Inquiries_clean", col("Num_Credit_Inquiries").cast(IntegerType()))
@@ -255,6 +251,7 @@ def process_silver_table_financials(snapshot_date_str, bronze_financials_directo
     df = df.withColumn("delayed_payment_rate", delayed_rate)
 
     #tag accounts where ratio of EMI to monthly salary is greater than 1, and set EMI to null for those accounts
+    df = df.withColumn("Total_EMI_per_month_clean", col("Total_EMI_per_month").cast(FloatType()))
     df = df.withColumn("Total_EMI_per_month_flag",
        F.coalesce((col("Total_EMI_per_month_clean") / col("Monthly_Inhand_Salary")) > 1, F.lit(False)))
     df = df.withColumn("Total_EMI_per_month_clean",
@@ -265,6 +262,7 @@ def process_silver_table_financials(snapshot_date_str, bronze_financials_directo
         F.when(col("Monthly_Balance_clean") < 0, None).otherwise(col("Monthly_Balance_clean")))
 
     # Payment_Behaviour: split into spent_level and value_tier
+    df = df.withColumn("Payment_Behaviour_clean", col("Payment_Behaviour").cast(StringType()))
     behaviour_parts = split(col("Payment_Behaviour_clean"), "_")
     df = df.withColumn("spent_level", behaviour_parts[0])
     df = df.withColumn("value_tier", behaviour_parts[2])
